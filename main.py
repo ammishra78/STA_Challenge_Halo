@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 =============================================================================
 ANESTHESIA DEVICE ASSISTANT - BACKEND SERVER
@@ -74,26 +75,23 @@ app.mount("/manual_images", StaticFiles(directory="manual_images"), name="manual
 # CONFIGURATION - Settings that control how the app behaves
 # =============================================================================
 
-# OpenAI API Key - Loaded from environment variable for security
+# OpenAI API Key - Loaded lazily from environment variable for security
 # Users must set OPENAI_API_KEY environment variable before running the server
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+_openai_key = None
 
-# Check if API key is set
-if not OPENAI_KEY:
-    print("=" * 60)
-    print("ERROR: OPENAI_API_KEY environment variable is not set!")
-    print("=" * 60)
-    print("\nPlease set your OpenAI API key before running the server:")
-    print("\n  Linux/macOS:")
-    print("    export OPENAI_API_KEY='your-api-key-here'")
-    print("\n  Windows PowerShell:")
-    print("    $env:OPENAI_API_KEY = 'your-api-key-here'")
-    print("\n  Windows Command Prompt:")
-    print("    set OPENAI_API_KEY=your-api-key-here")
-    print("\nGet your API key from: https://platform.openai.com/api-keys")
-    print("=" * 60)
-    import sys
-    sys.exit(1)
+def get_openai_key():
+    """Lazily get the OpenAI API key from environment variable."""
+    global _openai_key
+    if _openai_key is None:
+        _openai_key = os.getenv("OPENAI_API_KEY")
+        if not _openai_key:
+            raise EnvironmentError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Please set it before making API calls.\n"
+                "  Linux/macOS: export OPENAI_API_KEY='your-key'\n"
+                "  Windows: $env:OPENAI_API_KEY = 'your-key'"
+            )
+    return _openai_key
 
 # Maximum number of tokens (words/word-pieces) the AI can generate in its response
 # Higher = more text but more expensive. 300 is enough for our JSON response.
@@ -115,6 +113,10 @@ MAX_OUTPUT_TOKENS = 300
 CONFIDENCE_THRESHOLD = 0.6  # General threshold (not currently used, kept for reference)
 MANUFACTURER_CONFIDENCE_THRESHOLD = 0.6  # 60% confidence needed for manufacturer
 MODEL_NUMBER_CONFIDENCE_THRESHOLD = 0.6  # 60% confidence needed for model number
+
+# Device matching threshold - used when AI suggests a similar device from our database
+# Higher threshold = stricter matching, lower false positives
+DEVICE_MATCH_CONFIDENCE_THRESHOLD = 0.7  # 70% confidence needed to suggest a device match
 
 
 # =============================================================================
@@ -164,7 +166,8 @@ def home():
     - At the "/" URL (root/home page)
     """
     # Open and read the HTML file, then send it as a response
-    with open("static/index.html",encoding='utf-8') as f:
+    # Use UTF-8 encoding explicitly for Windows compatibility
+    with open("static/index.html", encoding="utf-8") as f:
         return HTMLResponse(f.read())
 
 
@@ -246,7 +249,7 @@ async def extract_model(image: UploadFile = File(...)):
     }
 
     # Authentication header with our API key
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}"}
+    headers = {"Authorization": f"Bearer {get_openai_key()}"}
 
     # STEP 5: Prepare a default error response
     # This will be returned if anything goes wrong
@@ -418,6 +421,63 @@ def api_get_manufacturers():
     return {"manufacturers": db_get_manufacturers()}
 
 
+@app.get("/api/device-types")
+def api_get_device_types():
+    """
+    GET DEVICE TYPES ENDPOINT
+    
+    Returns a list of all supported device types.
+    
+    URL: GET /api/device-types
+    
+    Returns:
+        dict: {"device_types": ["Anesthesia Machine", "Infusion Pump", ...]}
+    """
+    from device_database import get_device_types
+    return {"device_types": get_device_types()}
+
+
+@app.get("/api/devices-by-type")
+def api_get_devices_by_type():
+    """
+    GET ALL DEVICES GROUPED BY TYPE ENDPOINT
+    
+    Returns all devices grouped by their device type.
+    Used for the Devices tab display.
+    
+    URL: GET /api/devices-by-type
+    
+    Returns:
+        dict: {
+            "Anesthesia Machine": [
+                {"manufacturer": "Dräger", "model": "Apollo", "has_manual": true},
+                ...
+            ],
+            "Infusion Pump": [...],
+            ...
+        }
+    """
+    from device_database import get_all_devices_grouped_by_type
+    import os
+    
+    grouped = get_all_devices_grouped_by_type()
+    
+    # Add has_manual flag based on local file existence
+    result = {}
+    for device_type, devices in grouped.items():
+        result[device_type] = []
+        for device in devices:
+            local_path = device.get("local")
+            has_manual = local_path and os.path.exists(local_path)
+            result[device_type].append({
+                "manufacturer": device["manufacturer"],
+                "model": device["model"],
+                "has_manual": has_manual
+            })
+    
+    return result
+
+
 @app.get("/api/models/{manufacturer}")
 def api_get_models(manufacturer: str):
     """
@@ -469,31 +529,291 @@ def check_manual(manufacturer: str, model: str):
     
     if docs:
         local_path = docs.get("local")
-        remote_url = docs.get("remote")
         
-        # Check if local file exists or if we can download it
+        # Only consider manual as available if local file EXISTS
+        # (RAG requires local files - remote URLs alone are not sufficient)
         if local_path and os.path.exists(local_path):
             manual_name = os.path.basename(local_path)
             return {
                 "has_manual": True,
                 "manual_name": manual_name,
                 "device_name": device_name,
-                "source": "local"
-            }
-        elif remote_url:
-            # Manual can be downloaded
-            return {
-                "has_manual": True,
-                "manual_name": os.path.basename(local_path) if local_path else "Remote Manual",
-                "device_name": device_name,
-                "source": "remote"
+                "local_path": local_path
             }
     
-    # No manual found
+    # No local manual found (remote-only or no docs configured)
     return {
         "has_manual": False,
         "device_name": device_name
     }
+
+
+# =============================================================================
+# DEVICE MATCHING ENDPOINT - Find closest device when exact match fails
+# =============================================================================
+
+def get_all_devices_list() -> list:
+    """
+    Returns a flat list of all devices in the database for AI matching.
+    Format: ["Manufacturer: Model", ...]
+    """
+    from device_database import DEVICE_DATABASE
+    devices = []
+    for manufacturer, data in DEVICE_DATABASE.items():
+        for model in data["models"].keys():
+            devices.append(f"{manufacturer}: {model}")
+    return devices
+
+
+def match_device_with_ai(input_manufacturer: str, input_model: str) -> dict:
+    """
+    Uses ChatGPT to find the closest matching device from our database.
+    
+    This function is called when the user's device doesn't exactly match
+    any device in our database. It asks the AI to find the best match.
+    
+    Parameters:
+        input_manufacturer: The manufacturer name provided by the user
+        input_model: The model name provided by the user
+    
+    Returns:
+        dict: {
+            "suggested_manufacturer": str or None,
+            "suggested_model": str or None,
+            "confidence": float (0.0-1.0),
+            "reasoning": str
+        }
+    """
+    print(f"\n🔍 AI DEVICE MATCHING: Input = '{input_manufacturer}' / '{input_model}'")
+    
+    # Get all devices from our database
+    all_devices = get_all_devices_list()
+    devices_list = "\n".join([f"- {device}" for device in all_devices])
+    
+    print(f"📋 Searching against {len(all_devices)} devices in database")
+    
+    # Construct the user's input
+    user_input = f"{input_manufacturer} {input_model}".strip()
+    
+    # Create the prompt for AI matching
+    prompt = f"""You are a device matching assistant. A user has provided a device name that doesn't exactly match our database.
+
+USER INPUT: "{user_input}"
+
+OUR SUPPORTED DEVICES:
+{devices_list}
+
+Your task:
+1. Find the BEST matching device from our list based on the user input
+2. Consider variations like:
+   - Abbreviated names (e.g., "A100" might mean "Atlan A100")
+   - Spelling variations (e.g., "Drager" = "Dräger")
+   - Missing product line names (e.g., "A350" might mean "Atlan A350")
+   - Similar model numbers
+3. Provide a confidence score (0.0 to 1.0) for your match
+4. If no reasonable match exists, set confidence to 0.0
+
+Respond ONLY with valid JSON in this exact format:
+{{
+    "suggested_manufacturer": "Exact manufacturer name from the list or null",
+    "suggested_model": "Exact model name from the list or null",
+    "confidence": 0.85,
+    "reasoning": "Brief explanation of why this is a match"
+}}
+
+IMPORTANT:
+- suggested_manufacturer and suggested_model must EXACTLY match entries from the list above
+- confidence should be 0.0 if there's no reasonable match
+- confidence should be 0.9+ only for very clear matches (e.g., "Drager A100" → "Dräger Atlan A100")
+- confidence should be 0.7-0.9 for likely matches with some uncertainty
+- confidence should be below 0.7 for weak/uncertain matches"""
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {get_openai_key()}"
+    }
+    
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "You are a precise device matching assistant. Always respond with valid JSON only."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 300,
+        "temperature": 0.1  # Low temperature for consistent matching
+    }
+    
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=15
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        content = result["choices"][0]["message"]["content"].strip()
+        
+        print(f"🤖 ChatGPT Raw Response: {content}")
+        
+        # Parse the JSON response (handle markdown-wrapped JSON)
+        if content.startswith("```"):
+            lines = content.split("\n")
+            content = "\n".join(lines[1:-1])
+        
+        match_data = json.loads(content)
+        
+        print(f"✅ Parsed Match: {match_data.get('suggested_manufacturer')} / {match_data.get('suggested_model')} (confidence: {match_data.get('confidence')})")
+        
+        return {
+            "suggested_manufacturer": match_data.get("suggested_manufacturer"),
+            "suggested_model": match_data.get("suggested_model"),
+            "confidence": float(match_data.get("confidence", 0.0)),
+            "reasoning": match_data.get("reasoning", "")
+        }
+        
+    except Exception as e:
+        print(f"❌ Device matching error: {e}")
+        return {
+            "suggested_manufacturer": None,
+            "suggested_model": None,
+            "confidence": 0.0,
+            "reasoning": f"Error during matching: {str(e)}"
+        }
+
+
+@app.post("/api/match-device")
+def match_device(request: dict):
+    """
+    DEVICE MATCHING ENDPOINT
+    
+    Attempts to match the user's device input to our database.
+    First tries exact match, then falls back to AI-assisted matching.
+    
+    Request Body:
+        {
+            "manufacturer": "Drager",
+            "model": "A100"
+        }
+    
+    Response:
+        {
+            "exact_match": true/false,
+            "manufacturer": "Dräger",      (matched or original)
+            "model": "Atlan A100",         (matched or original)
+            "suggested": false,            (true if AI suggestion)
+            "confidence": 0.85,            (AI confidence, 1.0 for exact)
+            "meets_threshold": true/false,
+            "threshold": 0.7,
+            "message": "..." 
+        }
+    """
+    from device_database import DEVICE_DATABASE, get_model_docs
+    
+    input_manufacturer = request.get("manufacturer", "").strip()
+    input_model = request.get("model", "").strip()
+    
+    print(f"\n{'='*60}")
+    print(f"🔎 MATCH-DEVICE API CALLED")
+    print(f"   Manufacturer: '{input_manufacturer}'")
+    print(f"   Model: '{input_model}'")
+    print(f"{'='*60}")
+    
+    # Step 1: Try exact match
+    docs = get_model_docs(input_manufacturer, input_model)
+    
+    if docs:
+        # Exact match found
+        print(f"✅ EXACT MATCH FOUND - proceeding with original values")
+        return {
+            "exact_match": True,
+            "manufacturer": input_manufacturer,
+            "model": input_model,
+            "suggested": False,
+            "confidence": 1.0,
+            "meets_threshold": True,
+            "threshold": DEVICE_MATCH_CONFIDENCE_THRESHOLD,
+            "message": "Device found in database."
+        }
+    
+    # Step 2: Try case-insensitive and partial matching before AI
+    print(f"🔄 Step 2: Trying case-insensitive matching...")
+    for mfr_name, mfr_data in DEVICE_DATABASE.items():
+        # Check manufacturer similarity (case-insensitive, handle umlauts)
+        mfr_lower = mfr_name.lower().replace("ä", "a").replace("ö", "o").replace("ü", "u")
+        input_mfr_lower = input_manufacturer.lower().replace("ä", "a").replace("ö", "o").replace("ü", "u")
+        
+        if mfr_lower == input_mfr_lower or input_mfr_lower in mfr_lower or mfr_lower in input_mfr_lower:
+            print(f"   Manufacturer match: '{mfr_name}' matches input '{input_manufacturer}'")
+            # Manufacturer matches, check models
+            for model_name in mfr_data["models"].keys():
+                model_lower = model_name.lower()
+                input_model_lower = input_model.lower()
+                
+                # Exact model match (case-insensitive)
+                if model_lower == input_model_lower:
+                    print(f"✅ CASE-INSENSITIVE MATCH: {mfr_name} / {model_name}")
+                    return {
+                        "exact_match": True,
+                        "manufacturer": mfr_name,
+                        "model": model_name,
+                        "suggested": False,
+                        "confidence": 1.0,
+                        "meets_threshold": True,
+                        "threshold": DEVICE_MATCH_CONFIDENCE_THRESHOLD,
+                        "message": "Device found in database."
+                    }
+    
+    # Step 3: Use AI to find the best match
+    print(f"🤖 Step 3: No match found, calling AI for similarity matching...")
+    ai_match = match_device_with_ai(input_manufacturer, input_model)
+    
+    suggested_manufacturer = ai_match.get("suggested_manufacturer")
+    suggested_model = ai_match.get("suggested_model")
+    confidence = ai_match.get("confidence", 0.0)
+    reasoning = ai_match.get("reasoning", "")
+    
+    meets_threshold = confidence >= DEVICE_MATCH_CONFIDENCE_THRESHOLD
+    
+    if suggested_manufacturer and suggested_model and meets_threshold:
+        # AI found a good match
+        return {
+            "exact_match": False,
+            "manufacturer": suggested_manufacturer,
+            "model": suggested_model,
+            "suggested": True,
+            "confidence": confidence,
+            "meets_threshold": True,
+            "threshold": DEVICE_MATCH_CONFIDENCE_THRESHOLD,
+            "reasoning": reasoning,
+            "message": f"Did you mean {suggested_manufacturer} {suggested_model}?"
+        }
+    elif suggested_manufacturer and suggested_model:
+        # AI found a match but below threshold
+        return {
+            "exact_match": False,
+            "manufacturer": suggested_manufacturer,
+            "model": suggested_model,
+            "suggested": True,
+            "confidence": confidence,
+            "meets_threshold": False,
+            "threshold": DEVICE_MATCH_CONFIDENCE_THRESHOLD,
+            "reasoning": reasoning,
+            "message": "We were unable to determine the device you are referring to based on the currently supported platforms."
+        }
+    else:
+        # No match found
+        return {
+            "exact_match": False,
+            "manufacturer": input_manufacturer,
+            "model": input_model,
+            "suggested": False,
+            "confidence": 0.0,
+            "meets_threshold": False,
+            "threshold": DEVICE_MATCH_CONFIDENCE_THRESHOLD,
+            "message": "We were unable to determine the device you are referring to based on the currently supported platforms."
+        }
 
 
 def web_search_fallback(manufacturer: str, model: str, question: str) -> dict:
@@ -546,7 +866,7 @@ Remember: Your response will be clearly labeled as coming from internet sources,
             ]
         }
         
-        headers = {"Authorization": f"Bearer {OPENAI_KEY}"}
+        headers = {"Authorization": f"Bearer {get_openai_key()}"}
         response = requests.post("https://api.openai.com/v1/responses", json=payload, headers=headers)
         result = response.json()
         

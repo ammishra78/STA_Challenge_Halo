@@ -543,6 +543,15 @@ function resetState() {
     const editSection = document.getElementById('editModeSection');
     if (editSection) editSection.classList.add('hidden');
     
+    // Hide device suggestion and no-match UIs
+    const deviceSuggestion = document.getElementById('deviceSuggestion');
+    if (deviceSuggestion) deviceSuggestion.classList.add('hidden');
+    const noDeviceMatch = document.getElementById('noDeviceMatch');
+    if (noDeviceMatch) noDeviceMatch.classList.add('hidden');
+    
+    // Clear pending suggestion
+    pendingSuggestion = null;
+    
     // Reset confirm button
     const confirmBtn = document.getElementById('confirmBtn');
     if (confirmBtn) {
@@ -585,11 +594,14 @@ function resetState() {
     // Reset chat subtitle
     const chatDeviceInfo = document.getElementById("chatDeviceInfo");
     if (chatDeviceInfo) {
-        chatDeviceInfo.textContent = "Ask questions about your device";
+        chatDeviceInfo.textContent = "Current Device: None selected";
     }
     
     // Clear chat history
     clearChatHistory();
+    
+    // Reset chat placeholder to generic text
+    resetChatPlaceholder();
     
     // Hide all banners
     hideBanners();
@@ -668,6 +680,9 @@ async function setupInlineSelectMode() {
     const mfrSelect = document.getElementById('manufacturerSelect');
     const modelSelect = document.getElementById('modelSelect');
     const confirmBtn = document.getElementById('confirmBtn');
+    const freeTextSection = document.getElementById('selectModeFreeText');
+    const mfrInput = document.getElementById('selectModeManufacturerInput');
+    const modelInput = document.getElementById('selectModeModelInput');
     
     if (!mfrSelect) return;
     
@@ -675,6 +690,12 @@ async function setupInlineSelectMode() {
     if (state.manufacturers.length === 0) {
         await loadManufacturers();
     }
+    
+    // Hide free text section initially and clear inputs
+    if (freeTextSection) freeTextSection.classList.add('hidden');
+    if (mfrInput) mfrInput.value = '';
+    if (modelInput) modelInput.value = '';
+    state.isUsingFreeText = false;
     
     // Populate manufacturer dropdown
     mfrSelect.innerHTML = '<option value="">-- Select --</option>';
@@ -685,12 +706,29 @@ async function setupInlineSelectMode() {
         mfrSelect.appendChild(option);
     });
     
+    // Add "Not on this list" option
+    const notListedMfr = document.createElement('option');
+    notListedMfr.value = '__NOT_LISTED__';
+    notListedMfr.textContent = '⚠️ Not on this list';
+    mfrSelect.appendChild(notListedMfr);
+    
     // Handle manufacturer change
     mfrSelect.onchange = async function() {
         const value = this.value;
-        state.selectedManufacturer = value;
         
-        if (value) {
+        if (value === '__NOT_LISTED__') {
+            // Show free text section for custom entry
+            state.isUsingFreeText = true;
+            if (freeTextSection) freeTextSection.classList.remove('hidden');
+            modelSelect.disabled = true;
+            state.selectedManufacturer = null;
+            state.selectedModel = null;
+        } else if (value) {
+            // Hide free text section, load models
+            state.isUsingFreeText = false;
+            if (freeTextSection) freeTextSection.classList.add('hidden');
+            state.selectedManufacturer = value;
+            
             const response = await fetch(`/api/models/${encodeURIComponent(value)}`);
             const data = await response.json();
             const models = data.models || [];
@@ -702,8 +740,17 @@ async function setupInlineSelectMode() {
                 option.textContent = model;
                 modelSelect.appendChild(option);
             });
+            
+            // Add "Not on this list" option for models
+            const notListedModel = document.createElement('option');
+            notListedModel.value = '__NOT_LISTED__';
+            notListedModel.textContent = '⚠️ Not on this list';
+            modelSelect.appendChild(notListedModel);
+            
             modelSelect.disabled = false;
         } else {
+            state.isUsingFreeText = false;
+            if (freeTextSection) freeTextSection.classList.add('hidden');
             modelSelect.innerHTML = '<option value="">-- Select --</option>';
             modelSelect.disabled = true;
         }
@@ -714,9 +761,26 @@ async function setupInlineSelectMode() {
     
     // Handle model change
     modelSelect.onchange = function() {
-        state.selectedModel = this.value;
+        const value = this.value;
+        
+        if (value === '__NOT_LISTED__') {
+            // Show free text section for custom model entry
+            state.isUsingFreeText = true;
+            if (freeTextSection) freeTextSection.classList.remove('hidden');
+            state.selectedModel = null;
+        } else {
+            state.selectedModel = value;
+        }
         updateInlineConfirmButton();
     };
+    
+    // Add input listeners for free text fields to update confirm button
+    if (mfrInput) {
+        mfrInput.oninput = updateInlineConfirmButton;
+    }
+    if (modelInput) {
+        modelInput.oninput = updateInlineConfirmButton;
+    }
     
     // Initially disable confirm button
     if (confirmBtn) confirmBtn.disabled = true;
@@ -724,12 +788,28 @@ async function setupInlineSelectMode() {
 
 /**
  * Updates confirm button state for inline select mode.
+ * Handles both dropdown selection and free text input.
  */
 function updateInlineConfirmButton() {
     const confirmBtn = document.getElementById('confirmBtn');
-    if (confirmBtn) {
-        confirmBtn.disabled = !(state.selectedManufacturer && state.selectedModel);
+    if (!confirmBtn) return;
+    
+    let hasManufacturer = false;
+    let hasModel = false;
+    
+    if (state.isUsingFreeText) {
+        // In free text mode, check the select mode input fields
+        const mfrInput = document.getElementById('selectModeManufacturerInput');
+        const modelInput = document.getElementById('selectModeModelInput');
+        hasManufacturer = mfrInput && mfrInput.value.trim() !== '';
+        hasModel = modelInput && modelInput.value.trim() !== '';
+    } else {
+        // In dropdown mode, check the state
+        hasManufacturer = state.selectedManufacturer && state.selectedManufacturer !== '';
+        hasModel = state.selectedModel && state.selectedModel !== '';
     }
+    
+    confirmBtn.disabled = !(hasManufacturer && hasModel);
 }
 
 
@@ -985,35 +1065,323 @@ function showStreamlinedResults(data) {
 /**
  * Called when user confirms the detected device is correct.
  */
-function confirmDeviceCorrect() {
-    // Set global variables for chat
-    window.currentManufacturer = state.selectedManufacturer;
-    window.currentModel = state.selectedModel;
+/**
+ * Stores the current device suggestion from the AI matching.
+ * This is used when the user clicks "Yes, use this device".
+ */
+let pendingSuggestion = null;
+
+
+// =============================================================================
+// UNIFIED DEVICE VERIFICATION & CONFIRMATION
+// =============================================================================
+// This section handles device confirmation for BOTH flows:
+// 1. Photo upload flow (confirmDeviceCorrect)
+// 2. Select device flow (handleConfirmSelection)
+//
+// The unified flow:
+// 1. verifyAndConfirmDevice() - Main entry point, calls match-device API
+// 2. showDeviceSuggestion() - Shows "Did you mean?" UI
+// 3. showNoDeviceMatch() - Shows "No match found" UI  
+// 4. finalizeDeviceConfirmation() - Completes confirmation and shows chat
+// =============================================================================
+
+
+/**
+ * UNIFIED DEVICE VERIFICATION
+ * 
+ * Main function that verifies a device against our database and handles
+ * the confirmation flow. Used by both photo upload and select device modes.
+ * 
+ * @param {string} manufacturer - The manufacturer name to verify
+ * @param {string} model - The model name to verify
+ * @param {Object} options - Configuration options
+ * @param {Function} options.onLoading - Called when verification starts
+ * @param {Function} options.onSuggestion - Called when AI suggests a match
+ * @param {Function} options.onNoMatch - Called when no match is found
+ * @param {Function} options.onComplete - Called when verification completes successfully
+ * @param {Function} options.onError - Called on error (defaults to proceeding anyway)
+ */
+async function verifyAndConfirmDevice(manufacturer, model, options = {}) {
+    const {
+        onLoading = () => {},
+        onSuggestion = showDeviceSuggestion,
+        onNoMatch = showNoDeviceMatch,
+        onComplete = finalizeDeviceConfirmation,
+        onError = (mfr, mdl) => finalizeDeviceConfirmation(mfr, mdl)
+    } = options;
     
-    // Hide confirm/edit buttons
+    // Store values in state
+    state.selectedManufacturer = manufacturer;
+    state.selectedModel = model;
+    
+    // Show loading state
+    onLoading();
+    
+    try {
+        // Call the match-device API
+        const response = await fetch('/api/match-device', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ manufacturer, model })
+        });
+        
+        const matchResult = await response.json();
+        
+        if (matchResult.exact_match) {
+            // Exact match found - use the matched values (may have proper casing/umlauts)
+            onComplete(matchResult.manufacturer, matchResult.model);
+        } else if (matchResult.suggested && matchResult.meets_threshold) {
+            // AI found a good suggestion - show "Did you mean...?"
+            onSuggestion(matchResult);
+        } else {
+            // No match found
+            onNoMatch(matchResult);
+        }
+    } catch (error) {
+        console.error('Error matching device:', error);
+        // On error, proceed with original values (fallback)
+        onError(manufacturer, model);
+    }
+}
+
+
+/**
+ * Confirms the detected device is correct (PHOTO UPLOAD FLOW).
+ * Delegates to the unified verification function.
+ */
+async function confirmDeviceCorrect() {
+    const manufacturer = state.selectedManufacturer;
+    const model = state.selectedModel;
+    
+    await verifyAndConfirmDevice(manufacturer, model, {
+        onLoading: () => {
+            // Hide confirm/edit buttons while checking
+            document.getElementById('confirmEditButtons')?.classList.add('hidden');
+            
+            // Show loading state in the detected device view
+            const detectedDevice = document.getElementById('detectedDeviceView');
+            if (detectedDevice) {
+                detectedDevice.innerHTML = `
+                    <div class="detected-device-checking">
+                        <span class="checking-spinner">⏳</span>
+                        <span>Verifying device in database...</span>
+                    </div>
+                `;
+            }
+        }
+    });
+}
+
+
+/**
+ * Shows the "Did you mean...?" suggestion UI.
+ * @param {Object} matchResult - The result from the match-device API
+ */
+function showDeviceSuggestion(matchResult) {
+    // Store the suggestion for later use
+    pendingSuggestion = {
+        manufacturer: matchResult.manufacturer,
+        model: matchResult.model,
+        confidence: matchResult.confidence,
+        reasoning: matchResult.reasoning
+    };
+    
+    // Hide other elements
     document.getElementById('confirmEditButtons')?.classList.add('hidden');
+    document.getElementById('noDeviceMatch')?.classList.add('hidden');
+    elements.confirmBtn()?.classList.add('hidden');
     
-    // Update the detected device view to show it's confirmed
+    // Remove any inline suggestion container
+    const inlineContainer = document.getElementById('inlineSuggestionContainer');
+    if (inlineContainer) inlineContainer.remove();
+    
+    // Restore the detected device view
     const detectedDevice = document.getElementById('detectedDeviceView');
     if (detectedDevice) {
         detectedDevice.innerHTML = `
-            <div class="detected-device-confirmed">
-                <span class="confirmed-icon">✓</span>
-                <div>
-                    <div class="detected-device-name">
-                        ${state.selectedManufacturer || '—'} • ${state.selectedModel || '—'}
-                    </div>
-                    <div class="detected-status">Device confirmed</div>
+            <div class="detected-device-grid">
+                <div class="detected-field">
+                    <div class="detected-label">Your Input</div>
+                    <div class="detected-value">${state.selectedManufacturer || '—'} ${state.selectedModel || '—'}</div>
                 </div>
             </div>
         `;
     }
     
-    // Show the chat section directly
+    // Populate the suggestion UI
+    const suggestedDeviceInfo = document.getElementById('suggestedDeviceInfo');
+    if (suggestedDeviceInfo) {
+        suggestedDeviceInfo.innerHTML = `
+            <div class="suggested-device-name">${matchResult.manufacturer} ${matchResult.model}</div>
+        `;
+    }
+    
+    const suggestionConfidence = document.getElementById('suggestionConfidence');
+    if (suggestionConfidence) {
+        const confidencePercent = Math.round(matchResult.confidence * 100);
+        suggestionConfidence.innerHTML = `
+            Match confidence: <strong>${confidencePercent}%</strong>
+            ${matchResult.reasoning ? `<br><em>${matchResult.reasoning}</em>` : ''}
+        `;
+    }
+    
+    // Show the suggestion UI
+    document.getElementById('deviceSuggestion')?.classList.remove('hidden');
+}
+
+
+/**
+ * Shows the "no match found" error message.
+ */
+function showNoDeviceMatch() {
+    // Hide other elements
+    document.getElementById('confirmEditButtons')?.classList.add('hidden');
+    document.getElementById('deviceSuggestion')?.classList.add('hidden');
+    elements.confirmBtn()?.classList.add('hidden');
+    
+    // Remove any inline suggestion container
+    const inlineContainer = document.getElementById('inlineSuggestionContainer');
+    if (inlineContainer) inlineContainer.remove();
+    
+    // Restore the detected device view to show what was entered
+    const detectedDevice = document.getElementById('detectedDeviceView');
+    if (detectedDevice) {
+        detectedDevice.innerHTML = `
+            <div class="detected-device-grid">
+                <div class="detected-field">
+                    <div class="detected-label">Your Input</div>
+                    <div class="detected-value">${state.selectedManufacturer || '—'} ${state.selectedModel || '—'}</div>
+                </div>
+            </div>
+        `;
+    }
+    
+    // Show the no match UI
+    document.getElementById('noDeviceMatch')?.classList.remove('hidden');
+}
+
+
+/**
+ * User accepts the suggested device match.
+ */
+function acceptDeviceSuggestion() {
+    if (!pendingSuggestion) return;
+    
+    // Hide the suggestion UI
+    document.getElementById('deviceSuggestion')?.classList.add('hidden');
+    
+    // Update state with the suggested values
+    state.selectedManufacturer = pendingSuggestion.manufacturer;
+    state.selectedModel = pendingSuggestion.model;
+    
+    // Finalize with the suggested device
+    finalizeDeviceConfirmation(pendingSuggestion.manufacturer, pendingSuggestion.model);
+    
+    // Clear the pending suggestion
+    pendingSuggestion = null;
+}
+
+
+/**
+ * User rejects the suggestion and wants to enter manually.
+ */
+function rejectDeviceSuggestion() {
+    // Hide the suggestion UI
+    document.getElementById('deviceSuggestion')?.classList.add('hidden');
+    
+    // Clear pending suggestion
+    pendingSuggestion = null;
+    
+    // Show edit mode or reset for manual entry
+    if (state.identificationMode === 'photo') {
+        showEditMode();
+    } else {
+        // For select mode, reset to allow re-entry
+        switchToDropdownSelection();
+    }
+}
+
+
+/**
+ * UNIFIED FINALIZE CONFIRMATION
+ * 
+ * Completes the device confirmation and shows the chat.
+ * This is the final step for BOTH photo upload and select device flows.
+ * 
+ * @param {string} manufacturer - The confirmed manufacturer
+ * @param {string} model - The confirmed model
+ */
+function finalizeDeviceConfirmation(manufacturer, model) {
+    // Set global variables for chat
+    window.currentManufacturer = manufacturer;
+    window.currentModel = model;
+    
+    // Update state
+    state.selectedManufacturer = manufacturer;
+    state.selectedModel = model;
+    
+    // Update chat placeholder with device info
+    updateChatPlaceholder(manufacturer, model);
+    
+    // Hide all suggestion/error UIs
+    document.getElementById('deviceSuggestion')?.classList.add('hidden');
+    document.getElementById('noDeviceMatch')?.classList.add('hidden');
+    document.getElementById('confirmEditButtons')?.classList.add('hidden');
+    
+    // Remove any inline suggestion container
+    const inlineContainer = document.getElementById('inlineSuggestionContainer');
+    if (inlineContainer) inlineContainer.remove();
+    
+    // Update UI based on mode
+    if (state.identificationMode === 'photo') {
+        // Photo mode - update the detected device view
+        const detectedDevice = document.getElementById('detectedDeviceView');
+        if (detectedDevice) {
+            detectedDevice.innerHTML = `
+                <div class="detected-device-confirmed">
+                    <span class="confirmed-icon">✓</span>
+                    <div>
+                        <div class="detected-device-name">
+                            ${manufacturer || '—'} • ${model || '—'}
+                        </div>
+                        <div class="detected-status">Device confirmed</div>
+                    </div>
+                </div>
+            `;
+        }
+    } else {
+        // Select mode - update the confirm button
+        const confirmBtn = elements.confirmBtn();
+        if (confirmBtn) {
+            confirmBtn.textContent = "✓ Device Confirmed";
+            confirmBtn.style.background = "#6c757d";
+            confirmBtn.disabled = true;
+            confirmBtn.classList.remove('hidden');
+        }
+        
+        // Disable all input elements
+        elements.manufacturerSelect().disabled = true;
+        elements.modelSelect().disabled = true;
+        elements.manufacturerInput().disabled = true;
+        elements.modelInput().disabled = true;
+        
+        const selectMfrInput = document.getElementById('selectModeManufacturerInput');
+        const selectModelInput = document.getElementById('selectModeModelInput');
+        if (selectMfrInput) selectMfrInput.disabled = true;
+        if (selectModelInput) selectModelInput.disabled = true;
+    }
+    
+    // Hide warning banners
+    elements.warningBanner()?.classList.remove("show");
+    elements.partialSuccessBanner()?.classList.remove("show");
+    elements.noManualBanner()?.classList.remove("show");
+    
+    // Show the chat section
     elements.chat().classList.add("show");
     
     // Check if manual is available and show notification
-    checkAndShowManualStatus(state.selectedManufacturer, state.selectedModel);
+    checkAndShowManualStatus(manufacturer, model);
 }
 
 /**
@@ -1041,7 +1409,7 @@ function cancelEditMode() {
 /**
  * Confirms the edited device selection.
  */
-function confirmEditedDevice() {
+async function confirmEditedDevice() {
     const editMfrSelect = document.getElementById('editManufacturerSelect');
     const editModelSelect = document.getElementById('editModelSelect');
     const freeTextMfr = document.getElementById('manufacturerInput');
@@ -1058,36 +1426,32 @@ function confirmEditedDevice() {
         finalModel = freeTextModel?.value || '';
     }
     
-    // Update state and global variables
-    state.selectedManufacturer = finalMfr;
-    state.selectedModel = finalModel;
-    window.currentManufacturer = finalMfr;
-    window.currentModel = finalModel;
-    
     // Hide edit mode
     document.getElementById('editModeSection')?.classList.add('hidden');
     
-    // Update display and show confirmed state
-    const detectedDevice = document.getElementById('detectedDeviceView');
-    if (detectedDevice) {
-        detectedDevice.innerHTML = `
-            <div class="detected-device-confirmed">
-                <span class="confirmed-icon">✓</span>
-                <div>
-                    <div class="detected-device-name">
-                        ${finalMfr || '—'} • ${finalModel || '—'}
-                    </div>
-                    <div class="detected-status">Device confirmed</div>
-                </div>
-            </div>
-        `;
+    // Check if using free text
+    const isFreeText = (editMfrSelect?.value === '__NOT_LISTED__' || editModelSelect?.value === '__NOT_LISTED__');
+    
+    if (isFreeText) {
+        // Free text entry - use unified verification
+        await verifyAndConfirmDevice(finalMfr, finalModel, {
+            onLoading: () => {
+                // Show loading in the device view
+                const detectedDevice = document.getElementById('detectedDeviceView');
+                if (detectedDevice) {
+                    detectedDevice.innerHTML = `
+                        <div class="detected-device-checking">
+                            <span class="checking-spinner">⏳</span>
+                            <span>Verifying device in database...</span>
+                        </div>
+                    `;
+                }
+            }
+        });
+    } else {
+        // Device was selected from dropdowns - it's already in our database
+        finalizeDeviceConfirmation(finalMfr, finalModel);
     }
-    
-    // Show the chat section directly
-    elements.chat().classList.add("show");
-    
-    // Check if manual is available and show notification
-    checkAndShowManualStatus(finalMfr, finalModel);
 }
 
 /**
@@ -1150,8 +1514,10 @@ async function populateEditDropdowns(data) {
         if (value === '__NOT_LISTED__') {
             document.getElementById('freeTextSection')?.classList.remove('hidden');
             editModelSelect.disabled = true;
+            state.isUsingFreeText = true;
         } else if (value) {
             document.getElementById('freeTextSection')?.classList.add('hidden');
+            state.isUsingFreeText = false;
             // Load models for selected manufacturer
             const response = await fetch(`/api/models/${encodeURIComponent(value)}`);
             const modelData = await response.json();
@@ -1186,10 +1552,22 @@ async function populateEditDropdowns(data) {
         const value = this.value;
         if (value === '__NOT_LISTED__') {
             document.getElementById('freeTextSection')?.classList.remove('hidden');
+            state.isUsingFreeText = true;
         }
         state.selectedModel = value === '__NOT_LISTED__' ? null : value;
         updateConfirmButtonState();
     };
+    
+    // Add input listeners for free text fields in edit mode
+    const mfrInput = document.getElementById('manufacturerInput');
+    const modelInput = document.getElementById('modelInput');
+    
+    if (mfrInput) {
+        mfrInput.oninput = updateConfirmButtonState;
+    }
+    if (modelInput) {
+        modelInput.oninput = updateConfirmButtonState;
+    }
 }
 
 /**
@@ -1474,7 +1852,7 @@ async function checkAndShowManualStatus(manufacturer, model) {
         // Update chat subtitle with device info
         const chatDeviceInfo = document.getElementById("chatDeviceInfo");
         if (chatDeviceInfo) {
-            chatDeviceInfo.innerHTML = `<strong>${escapeHtml(data.device_name)}</strong>`;
+            chatDeviceInfo.innerHTML = `Current Device: <strong>${escapeHtml(data.device_name)}</strong>`;
         }
         
         if (data.has_manual) {
@@ -1520,41 +1898,114 @@ async function checkAndShowManualStatus(manufacturer, model) {
  * IMPORTANT: Free-text values ALWAYS override dropdown selections.
  */
 async function handleConfirmSelection() {
-    // Get free-text values (if any)
-    const freeTextMfr = elements.manufacturerInput().value.trim();
-    const freeTextModel = elements.modelInput().value.trim();
+    // Get free-text values from both possible locations
+    // (edit mode uses manufacturerInput/modelInput, select mode uses selectModeManufacturerInput/selectModeModelInput)
+    let freeTextMfr = '';
+    let freeTextModel = '';
+    
+    if (state.identificationMode === 'select') {
+        // Check select mode inputs
+        const selectMfrInput = document.getElementById('selectModeManufacturerInput');
+        const selectModelInput = document.getElementById('selectModeModelInput');
+        freeTextMfr = selectMfrInput ? selectMfrInput.value.trim() : '';
+        freeTextModel = selectModelInput ? selectModelInput.value.trim() : '';
+    } else {
+        // Check edit mode inputs (for photo upload flow)
+        freeTextMfr = elements.manufacturerInput().value.trim();
+        freeTextModel = elements.modelInput().value.trim();
+    }
     
     // Free-text takes precedence over dropdown
     // If user typed something, use that; otherwise use the dropdown selection
     const finalManufacturer = freeTextMfr || state.selectedManufacturer;
     const finalModel = freeTextModel || state.selectedModel;
     
-    // Store these values globally so the chat function can access them
-    // "window" makes them global (accessible from anywhere)
-    window.currentManufacturer = finalManufacturer;
-    window.currentModel = finalModel;
+    // Check if using free text - either typed values OR the "Not on this list" option was selected
+    const isUsingFreeText = !!(freeTextMfr || freeTextModel) || state.isUsingFreeText;
     
-    // Update the button to show completion
-    elements.confirmBtn().textContent = "✓ Device Confirmed";
-    elements.confirmBtn().style.background = "#6c757d";  // Gray color
-    elements.confirmBtn().disabled = true;
+    // DEBUG: Log what's happening
+    console.log('=== handleConfirmSelection DEBUG ===');
+    console.log('identificationMode:', state.identificationMode);
+    console.log('freeTextMfr:', freeTextMfr);
+    console.log('freeTextModel:', freeTextModel);
+    console.log('state.selectedManufacturer:', state.selectedManufacturer);
+    console.log('state.selectedModel:', state.selectedModel);
+    console.log('state.isUsingFreeText:', state.isUsingFreeText);
+    console.log('isUsingFreeText (computed):', isUsingFreeText);
+    console.log('finalManufacturer:', finalManufacturer);
+    console.log('finalModel:', finalModel);
+    console.log('=====================================');
     
-    // Disable all input elements (selection is final)
-    elements.manufacturerSelect().disabled = true;
-    elements.modelSelect().disabled = true;
-    elements.manufacturerInput().disabled = true;
-    elements.modelInput().disabled = true;
+    if (isUsingFreeText) {
+        console.log('>>> Calling verifyAndConfirmDevice...');
+        // Free text entry - use unified verification
+        await verifyAndConfirmDevice(finalManufacturer, finalModel, {
+            onLoading: () => {
+                elements.confirmBtn().textContent = "⏳ Verifying...";
+                elements.confirmBtn().disabled = true;
+            },
+            onError: (mfr, mdl) => {
+                // Reset button and proceed anyway on error
+                elements.confirmBtn().textContent = "💬 Start Chatting with Halo";
+                elements.confirmBtn().disabled = false;
+                finalizeDeviceConfirmation(mfr, mdl);
+            }
+        });
+    } else {
+        console.log('>>> Skipping verification - using dropdown selection directly');
+        // Selected from dropdown - device is already in our database
+        finalizeDeviceConfirmation(finalManufacturer, finalModel);
+    }
+}
+
+
+/**
+ * Switch back to dropdown selection mode.
+ */
+function switchToDropdownSelection() {
+    // Remove any suggestion/no-match UIs
+    const container = document.getElementById('inlineSuggestionContainer');
+    if (container) container.remove();
+    document.getElementById('deviceSuggestion')?.classList.add('hidden');
+    document.getElementById('noDeviceMatch')?.classList.add('hidden');
     
-    // Show the chat section (Step 3)
-    elements.chat().classList.add("show");
+    // Show confirm button again
+    elements.confirmBtn().classList.remove('hidden');
+    elements.confirmBtn().textContent = "💬 Start Chatting with Halo";
+    elements.confirmBtn().disabled = true;  // Disabled until valid selection
     
-    // Hide the warning banners (keep success banner if shown)
-    elements.warningBanner().classList.remove("show");
+    // Reset the free text inputs
+    const selectMfrInput = document.getElementById('selectModeManufacturerInput');
+    const selectModelInput = document.getElementById('selectModeModelInput');
+    if (selectMfrInput) selectMfrInput.value = '';
+    if (selectModelInput) selectModelInput.value = '';
     
-    // Check if manual is available and show notification
-    await checkAndShowManualStatus(finalManufacturer, finalModel);
-    elements.partialSuccessBanner().classList.remove("show");
-    elements.noManualBanner().classList.remove("show");
+    // Reset the manufacturer dropdown to trigger fresh selection
+    const mfrSelect = elements.manufacturerSelect();
+    if (mfrSelect) {
+        mfrSelect.value = '';
+        mfrSelect.dispatchEvent(new Event('change'));
+    }
+    
+    // Hide free text section
+    const freeTextSection = document.getElementById('selectModeFreeText');
+    if (freeTextSection) freeTextSection.classList.add('hidden');
+    
+    state.isUsingFreeText = false;
+    state.selectedManufacturer = null;
+    state.selectedModel = null;
+}
+
+
+/**
+ * Proceed with the unknown device anyway (will use fallback/web search).
+ */
+function proceedWithUnknownDevice() {
+    // Hide the no-match UI
+    document.getElementById('noDeviceMatch')?.classList.add('hidden');
+    
+    // Proceed with whatever they typed
+    finalizeDeviceConfirmation(state.selectedManufacturer, state.selectedModel);
 }
 
 
@@ -1885,12 +2336,39 @@ function clearChatHistory() {
 
 
 /**
+ * Updates the chat input placeholder to show the current device.
+ * @param {string} manufacturer - The device manufacturer
+ * @param {string} model - The device model
+ */
+function updateChatPlaceholder(manufacturer, model) {
+    const questionInput = document.getElementById('question');
+    if (questionInput && manufacturer && model) {
+        questionInput.placeholder = `Ask Halo anything about the ${manufacturer} ${model}...`;
+    }
+}
+
+
+/**
+ * Resets the chat input placeholder to the default text.
+ */
+function resetChatPlaceholder() {
+    const questionInput = document.getElementById('question');
+    if (questionInput) {
+        questionInput.placeholder = 'Ask Halo anything about this device...';
+    }
+}
+
+
+/**
  * Opens edit mode from the chat section.
  * Clears the chat, scrolls to the device section, and shows edit mode.
  */
 function editDeviceFromChat() {
     // Clear the chat history since we're changing the device
     clearChatHistory();
+    
+    // Reset chat placeholder to generic text
+    resetChatPlaceholder();
     
     // Hide the manual notification
     const manualNotification = document.getElementById('manualNotification');
@@ -1901,7 +2379,7 @@ function editDeviceFromChat() {
     // Reset chat subtitle
     const chatDeviceInfo = document.getElementById('chatDeviceInfo');
     if (chatDeviceInfo) {
-        chatDeviceInfo.textContent = 'Ask questions about your device';
+        chatDeviceInfo.textContent = 'Current Device: None selected';
     }
     
     // Clear answer and sources
@@ -1932,9 +2410,17 @@ function editDeviceFromChat() {
     if (mfrInput) mfrInput.disabled = false;
     if (modelInput) modelInput.disabled = false;
     
+    // Also re-enable select mode inputs
+    const selectMfrInput = document.getElementById('selectModeManufacturerInput');
+    const selectModelInput = document.getElementById('selectModeModelInput');
+    if (selectMfrInput) selectMfrInput.disabled = false;
+    if (selectModelInput) selectModelInput.disabled = false;
+    
     // Handle based on identification mode
     if (state.identificationMode === 'select') {
-        // For select mode, just scroll to device selection and re-enable editing
+        // For select mode, re-setup the inline select mode and scroll to it
+        setupInlineSelectMode();
+        
         const deviceSelection = document.getElementById('deviceSelection');
         if (deviceSelection) {
             deviceSelection.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2268,59 +2754,98 @@ async function loadDeviceList() {
     
     container.innerHTML = '<p class="loading-text">Loading device list...</p>';
     
+    // Icons for each device type
+    const typeIcons = {
+        "Anesthesia Machine": "🏥",
+        "Standalone Ventilator": "🌬️",
+        "Infusion Pump": "💉",
+        "Patient Monitor": "📊"
+    };
+    
     try {
-        // Fetch manufacturers (API returns {manufacturers: [...]})
-        const manuRes = await fetch('/api/manufacturers');
-        const manuData = await manuRes.json();
-        const manufacturers = manuData.manufacturers || [];
+        // Fetch all devices grouped by type (single API call - much faster!)
+        const response = await fetch('/api/devices-by-type');
+        const devicesByType = await response.json();
         
         let html = '';
         
-        for (const manufacturer of manufacturers) {
-            // Fetch models for each manufacturer (API returns {models: [...]})
-            const modelRes = await fetch(`/api/models/${encodeURIComponent(manufacturer)}`);
-            const modelData = await modelRes.json();
-            const models = modelData.models || [];
+        // Iterate through each device type
+        for (const [deviceType, devices] of Object.entries(devicesByType)) {
+            // Skip empty categories
+            if (!devices || devices.length === 0) continue;
             
-            // Build model list HTML
-            let modelsHtml = '';
-            let manualCount = 0;
+            // Group devices by manufacturer within this type
+            const byManufacturer = {};
+            let totalManualCount = 0;
             
-            for (const model of models) {
-                // Check if manual exists
-                const manualRes = await fetch(`/api/check-manual/${encodeURIComponent(manufacturer)}/${encodeURIComponent(model)}`);
-                const manualData = await manualRes.json();
+            for (const device of devices) {
+                if (!byManufacturer[device.manufacturer]) {
+                    byManufacturer[device.manufacturer] = [];
+                }
+                byManufacturer[device.manufacturer].push(device);
+                if (device.has_manual) totalManualCount++;
+            }
+            
+            // Build manufacturer subgroups HTML
+            let manufacturersHtml = '';
+            
+            for (const [manufacturer, mfrDevices] of Object.entries(byManufacturer)) {
+                let mfrManualCount = 0;
+                let modelsHtml = '';
                 
-                if (manualData.has_manual) manualCount++;
+                for (const device of mfrDevices) {
+                    if (device.has_manual) mfrManualCount++;
+                    
+                    const manualIcon = device.has_manual ? '📚' : '🌐';
+                    const manualClass = device.has_manual ? 'has-doc' : 'no-doc';
+                    
+                    // Escape quotes in manufacturer/model names for onclick
+                    const safeManufacturer = device.manufacturer.replace(/'/g, "\\'");
+                    const safeModel = device.model.replace(/'/g, "\\'");
+                    
+                    modelsHtml += `
+                        <div class="model-item ${manualClass}" onclick="selectDeviceFromList('${safeManufacturer}', '${safeModel}')">
+                            <span class="model-icon">${manualIcon}</span>
+                            <span class="model-name">${device.model}</span>
+                        </div>
+                    `;
+                }
                 
-                const manualIcon = manualData.has_manual ? '📚' : '🌐';
-                const manualClass = manualData.has_manual ? 'has-doc' : 'no-doc';
+                const mfrSafeId = `${deviceType}_${manufacturer}`.replace(/[^a-zA-Z0-9]/g, '_');
                 
-                // Escape quotes in manufacturer/model names for onclick
-                const safeManufacturer = manufacturer.replace(/'/g, "\\'");
-                const safeModel = model.replace(/'/g, "\\'");
-                
-                modelsHtml += `
-                    <div class="model-item ${manualClass}" onclick="selectDeviceFromList('${safeManufacturer}', '${safeModel}')">
-                        <span class="model-icon">${manualIcon}</span>
-                        <span class="model-name">${model}</span>
+                manufacturersHtml += `
+                    <div class="manufacturer-subgroup">
+                        <div class="manufacturer-subheader" onclick="toggleManufacturer('${mfrSafeId}')">
+                            <div class="manufacturer-subinfo">
+                                <span class="manufacturer-subname">${manufacturer}</span>
+                                <span class="manufacturer-subcount">${mfrDevices.length} model${mfrDevices.length !== 1 ? 's' : ''} • ${mfrManualCount} with manuals</span>
+                            </div>
+                            <span class="manufacturer-toggle" id="toggle-${mfrSafeId}">▼</span>
+                        </div>
+                        <div class="manufacturer-models nested" id="models-${mfrSafeId}">
+                            ${modelsHtml}
+                        </div>
                     </div>
                 `;
             }
             
-            // Create manufacturer group
-            const safeId = manufacturer.replace(/[^a-zA-Z0-9]/g, '_');
+            // Create device type group
+            const safeId = deviceType.replace(/[^a-zA-Z0-9]/g, '_');
+            const typeIcon = typeIcons[deviceType] || '📦';
+            const manufacturerCount = Object.keys(byManufacturer).length;
+            
             html += `
-                <div class="manufacturer-group">
-                    <div class="manufacturer-header" onclick="toggleManufacturer('${safeId}')">
-                        <div class="manufacturer-info">
-                            <span class="manufacturer-name">${manufacturer}</span>
-                            <span class="manufacturer-count">${models.length} model${models.length !== 1 ? 's' : ''} • ${manualCount} with manuals</span>
+                <div class="device-type-group">
+                    <div class="device-type-header" onclick="toggleManufacturer('${safeId}')">
+                        <div class="device-type-info">
+                            <span class="type-icon">${typeIcon}</span>
+                            <span class="device-type-name">${deviceType}</span>
+                            <span class="device-type-count">${manufacturerCount} manufacturer${manufacturerCount !== 1 ? 's' : ''} • ${devices.length} device${devices.length !== 1 ? 's' : ''} • ${totalManualCount} with manuals</span>
                         </div>
                         <span class="manufacturer-toggle" id="toggle-${safeId}">▼</span>
                     </div>
-                    <div class="manufacturer-models" id="models-${safeId}">
-                        ${modelsHtml}
+                    <div class="device-type-content" id="models-${safeId}">
+                        ${manufacturersHtml}
                     </div>
                 </div>
             `;
@@ -2344,8 +2869,16 @@ function toggleManufacturer(id) {
     const toggle = document.getElementById(`toggle-${id}`);
     
     if (models && toggle) {
-        const isHidden = models.classList.toggle('collapsed');
-        toggle.textContent = isHidden ? '▶' : '▼';
+        // Toggle visibility using 'hidden' class
+        const isCurrentlyHidden = models.classList.contains('hidden');
+        
+        if (isCurrentlyHidden) {
+            models.classList.remove('hidden');
+            toggle.textContent = '▼';
+        } else {
+            models.classList.add('hidden');
+            toggle.textContent = '▶';
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 RAG (Retrieval-Augmented Generation) Module
 
@@ -18,7 +19,6 @@ if sys.platform == 'win32':
         sys.stdout.reconfigure(encoding='utf-8')
     if hasattr(sys.stderr, 'reconfigure'):
         sys.stderr.reconfigure(encoding='utf-8')
-
 from typing import Optional, List, Dict, Any
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, load_index_from_storage, Settings
 from llama_index.llms.openai import OpenAI
@@ -32,22 +32,37 @@ from utils.pdf_images import get_images_for_pages
 # Directory where vector indexes are cached
 INDEX_DIR = "vector_indexes"
 
-# API Key - loaded from environment variable (set by user before running)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# LLM and embed_model are initialized lazily to avoid import-time errors
+_llm = None
+_embed_model = None
 
-if not OPENAI_API_KEY:
-    raise EnvironmentError(
-        "OPENAI_API_KEY environment variable is not set. "
-        "Please set it before running the application."
-    )
 
-# Configure LlamaIndex to use OpenAI for both LLM and embeddings
-llm = OpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY)
-embed_model = OpenAIEmbedding(api_key=OPENAI_API_KEY)
+def _get_llm():
+    """Lazily initialize and return the LLM instance."""
+    global _llm, _embed_model
+    
+    if _llm is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Please set it before running the application."
+            )
+        
+        _llm = OpenAI(model="gpt-4o-mini", api_key=api_key)
+        _embed_model = OpenAIEmbedding(api_key=api_key)
+        
+        # Set global defaults
+        Settings.llm = _llm
+        Settings.embed_model = _embed_model
+    
+    return _llm
 
-# Set global defaults so all index operations use these
-Settings.llm = llm
-Settings.embed_model = embed_model
+
+def _get_embed_model():
+    """Lazily initialize and return the embedding model."""
+    _get_llm()  # Ensures initialization
+    return _embed_model
 
 
 def _get_manual_path(manufacturer: str, model: str) -> Optional[str]:
@@ -144,6 +159,7 @@ def ask_question(manufacturer: str, model: str, question: str, history: Optional
     try:
         # Load/create index and query
         print(f"📖 Using manual: {manual_path}")
+        llm = _get_llm()  # Get the lazily-initialized LLM
         index = _load_or_create_index(manual_path)
         engine = index.as_query_engine(
             llm=llm,

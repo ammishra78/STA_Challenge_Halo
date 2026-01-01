@@ -38,7 +38,7 @@ def extract_images_from_pdf(pdf_path: str, min_width: int = 100, min_height: int
     index_path = os.path.join(output_dir, "index.json")
     if os.path.exists(index_path):
         print(f"📁 Loading existing image index for {pdf_name}")
-        with open(index_path, 'r',encoding='utf-8') as f:
+        with open(index_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     
     print(f"📸 Extracting images from {pdf_name}...")
@@ -99,8 +99,8 @@ def extract_images_from_pdf(pdf_path: str, min_width: int = 100, min_height: int
     
     doc.close()
     
-    # Save index
-    with open(index_path, 'w',encoding='utf-8') as f:
+    # Save index (use UTF-8 encoding for Windows compatibility)
+    with open(index_path, 'w', encoding='utf-8') as f:
         json.dump(page_images, f, indent=2)
     
     print(f"✅ Extracted {image_count} images from {len(page_images)} pages")

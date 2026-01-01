@@ -1,0 +1,45 @@
+# =============================================================================
+# DOCKER IGNORE - Files NOT included in Docker image
+# =============================================================================
+
+# Virtual environment (we install fresh in Docker)
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Local environment files
+.env
+.env.local
+
+# Uploaded files (regenerated)
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+
+# Backup archives
+*.tar.gz
+*.zip
+
+# =============================================================================
+# INCLUDE these (not ignored):
+# =============================================================================
+# manuals/          - PDF files
+# vector_indexes/   - Pre-built indexes
+# manual_images/    - Cached images (optional but helps)
+# static/           - Frontend files
+

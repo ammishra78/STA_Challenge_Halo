@@ -1,0 +1,46 @@
+# =============================================================================
+# RENDER DEPLOYMENT CONFIGURATION
+# =============================================================================
+# This file tells Render how to deploy your Halo application.
+# 
+# To deploy:
+# 1. Push this repo to GitHub
+# 2. Go to https://render.com and sign in with GitHub
+# 3. Click "New" → "Blueprint" → Select your repo
+# 4. Render will automatically detect this file and configure everything
+# 5. Add your OPENAI_API_KEY in the Render dashboard under Environment
+#
+# =============================================================================
+
+services:
+  # Define the web service
+  - type: web
+    name: halo-anesthesia
+    runtime: python
+    
+    # Use the free tier
+    plan: free
+    
+    # Build command - runs once when deploying
+    buildCommand: |
+      pip install -r requirements.txt
+      mkdir -p manuals manual_images uploads indexes
+    
+    # Start command - runs your app
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    
+    # Environment variables
+    envVars:
+      # Python UTF-8 mode (prevents encoding errors)
+      - key: PYTHONUTF8
+        value: "1"
+      # Your OpenAI API key - set this in the Render dashboard!
+      - key: OPENAI_API_KEY
+        sync: false  # Must be set manually in dashboard for security
+    
+    # Health check path (Render pings this to verify app is running)
+    healthCheckPath: /
+    
+    # Auto-deploy when you push to main branch
+    autoDeploy: true
+

@@ -24,6 +24,7 @@ A web application that helps users identify anesthesia machines from photos and 
 
 - Python 3.10+ installed
 - An OpenAI API key (with GPT-4o-mini access)
+  - Get your API key from: https://platform.openai.com/api-keys
 
 ### Step-by-Step Setup
 
@@ -31,7 +32,7 @@ A web application that helps users identify anesthesia machines from photos and 
 
 ```bash
 # 1. Navigate to the project directory
-cd C:\path\to\STA-Challenge\anesthesia
+cd PATH_TO_PROJECT/STA-Challenge/anesthesia
 
 # 2. Create a Python virtual environment
 python3 -m venv venv
@@ -72,6 +73,7 @@ pip list
 
 | Task | Bash (Linux/macOS) | PowerShell (Windows) |
 |------|-------------------|---------------------|
+| Set API Key | `export OPENAI_API_KEY='...'` | `$env:OPENAI_API_KEY = "..."` |
 | Create venv | `python3 -m venv venv` | `python -m venv venv` |
 | Activate venv | `source venv/bin/activate` | `.\venv\Scripts\Activate.ps1` |
 | Deactivate venv | `deactivate` | `deactivate` |
@@ -97,13 +99,18 @@ pip list
 
 ## Running the Application
 
+### Setting Up Your OpenAI API Key
+
+Before running the server, you must set your OpenAI API key as an environment variable.
+
 #### Linux/macOS (Bash)
 
 ```bash
-# Make sure you're in the project directory with venv activated
-# 1. Navigate to the project directory
-cd C:\path\to\STA-Challenge\anesthesia
+# Set your OpenAI API key (required)
+export OPENAI_API_KEY='your-api-key-here'
 
+# Make sure you're in the project directory with venv activated
+cd PATH_TO_PROJECT/STA-Challenge/anesthesia
 source venv/bin/activate
 
 # Start the web server
@@ -113,18 +120,40 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 #### Windows (PowerShell)
 
 ```powershell
-# Make sure you're in the project directory with venv activated
-cd C:\path\to\STA-Challenge\anesthesia
-.\venv\Scripts\Activate.ps1
+# Set your OpenAI API key (required)
+$env:OPENAI_API_KEY = "your-api-key-here"
 
 # IMPORTANT: Set UTF-8 encoding to avoid Unicode errors
 $env:PYTHONUTF8 = "1"
+
+# Make sure you're in the project directory with venv activated
+cd C:\path\to\STA-Challenge\anesthesia
+.\venv\Scripts\Activate.ps1
 
 # Start the web server
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+#### Windows (Command Prompt)
+
+```cmd
+:: Set your OpenAI API key (required)
+set OPENAI_API_KEY=your-api-key-here
+
+:: Set UTF-8 encoding
+set PYTHONUTF8=1
+
+:: Navigate and activate
+cd C:\path\to\STA-Challenge\anesthesia
+venv\Scripts\activate.bat
+
+:: Start the web server
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
 > **Note:** If you see `UnicodeDecodeError: 'charmap' codec can't decode byte...`, make sure to set the `PYTHONUTF8=1` environment variable before running the server.
+
+> **Tip:** To make the API key permanent, add it to your shell profile (`~/.bashrc`, `~/.zshrc`) or Windows Environment Variables.
 
 Then open your browser to: **http://localhost:8000**
 
@@ -890,7 +919,7 @@ Features:
 
 ## Future Enhancements
 
-- [ ] Environment variable for API key
+- [x] Environment variable for API key ✅
 - [ ] Multiple documents per device model
 - [ ] Database logging (Firebase)
 - [ ] Image-aware RAG (OCR on manual diagrams)

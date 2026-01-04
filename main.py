@@ -70,6 +70,10 @@ import os
 os.makedirs("manual_images", exist_ok=True)
 app.mount("/manual_images", StaticFiles(directory="manual_images"), name="manual_images")
 
+# Mount the manuals folder to allow PDF viewing/download
+os.makedirs("manuals", exist_ok=True)
+app.mount("/manuals", StaticFiles(directory="manuals"), name="manuals")
+
 
 # =============================================================================
 # CONFIGURATION - Settings that control how the app behaves
@@ -517,34 +521,49 @@ def check_manual(manufacturer: str, model: str):
         dict: {
             "has_manual": True/False,
             "manual_name": "...",  (if available)
-            "device_name": "Manufacturer Model"
+            "device_name": "Manufacturer Model",
+            "device_type": "Anesthesia Machine" (if available),
+            "pdf_url": "/manuals/..." (if available)
         }
     """
-    from device_database import get_model_docs
+    from device_database import get_model_info
     
     device_name = f"{manufacturer} {model}".strip() if manufacturer else model
     
     # Check if we have documentation for this device
-    docs = get_model_docs(manufacturer, model)
+    model_info = get_model_info(manufacturer, model)
     
-    if docs:
-        local_path = docs.get("local")
+    if model_info:
+        local_path = model_info.get("local")
+        device_type = model_info.get("type")
         
         # Only consider manual as available if local file EXISTS
         # (RAG requires local files - remote URLs alone are not sufficient)
         if local_path and os.path.exists(local_path):
             manual_name = os.path.basename(local_path)
+            # Create a URL for viewing/downloading the PDF
+            pdf_url = f"/{local_path}"  # e.g., "/manuals/Atlan_A_Series_User_Guide.pdf"
             return {
                 "has_manual": True,
                 "manual_name": manual_name,
                 "device_name": device_name,
+                "device_type": device_type,
+                "pdf_url": pdf_url,
                 "local_path": local_path
             }
+        
+        # Manual not available but we have device info (including type)
+        return {
+            "has_manual": False,
+            "device_name": device_name,
+            "device_type": device_type
+        }
     
-    # No local manual found (remote-only or no docs configured)
+    # No device found in database at all
     return {
         "has_manual": False,
-        "device_name": device_name
+        "device_name": device_name,
+        "device_type": None
     }
 
 
@@ -702,6 +721,7 @@ def match_device(request: dict):
             "exact_match": true/false,
             "manufacturer": "Dräger",      (matched or original)
             "model": "Atlan A100",         (matched or original)
+            "device_type": "Anesthesia Machine", (if found)
             "suggested": false,            (true if AI suggestion)
             "confidence": 0.85,            (AI confidence, 1.0 for exact)
             "meets_threshold": true/false,
@@ -709,7 +729,7 @@ def match_device(request: dict):
             "message": "..." 
         }
     """
-    from device_database import DEVICE_DATABASE, get_model_docs
+    from device_database import DEVICE_DATABASE, get_model_docs, get_model_info
     
     input_manufacturer = request.get("manufacturer", "").strip()
     input_model = request.get("model", "").strip()
@@ -726,10 +746,13 @@ def match_device(request: dict):
     if docs:
         # Exact match found
         print(f"✅ EXACT MATCH FOUND - proceeding with original values")
+        model_info = get_model_info(input_manufacturer, input_model)
+        device_type = model_info.get("type") if model_info else None
         return {
             "exact_match": True,
             "manufacturer": input_manufacturer,
             "model": input_model,
+            "device_type": device_type,
             "suggested": False,
             "confidence": 1.0,
             "meets_threshold": True,
@@ -754,10 +777,13 @@ def match_device(request: dict):
                 # Exact model match (case-insensitive)
                 if model_lower == input_model_lower:
                     print(f"✅ CASE-INSENSITIVE MATCH: {mfr_name} / {model_name}")
+                    model_info = get_model_info(mfr_name, model_name)
+                    device_type = model_info.get("type") if model_info else None
                     return {
                         "exact_match": True,
                         "manufacturer": mfr_name,
                         "model": model_name,
+                        "device_type": device_type,
                         "suggested": False,
                         "confidence": 1.0,
                         "meets_threshold": True,
@@ -777,11 +803,14 @@ def match_device(request: dict):
     meets_threshold = confidence >= DEVICE_MATCH_CONFIDENCE_THRESHOLD
     
     if suggested_manufacturer and suggested_model and meets_threshold:
-        # AI found a good match
+        # AI found a good match - get device type
+        model_info = get_model_info(suggested_manufacturer, suggested_model)
+        device_type = model_info.get("type") if model_info else None
         return {
             "exact_match": False,
             "manufacturer": suggested_manufacturer,
             "model": suggested_model,
+            "device_type": device_type,
             "suggested": True,
             "confidence": confidence,
             "meets_threshold": True,
@@ -791,10 +820,13 @@ def match_device(request: dict):
         }
     elif suggested_manufacturer and suggested_model:
         # AI found a match but below threshold
+        model_info = get_model_info(suggested_manufacturer, suggested_model)
+        device_type = model_info.get("type") if model_info else None
         return {
             "exact_match": False,
             "manufacturer": suggested_manufacturer,
             "model": suggested_model,
+            "device_type": device_type,
             "suggested": True,
             "confidence": confidence,
             "meets_threshold": False,
@@ -808,6 +840,7 @@ def match_device(request: dict):
             "exact_match": False,
             "manufacturer": input_manufacturer,
             "model": input_model,
+            "device_type": None,
             "suggested": False,
             "confidence": 0.0,
             "meets_threshold": False,

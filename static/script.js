@@ -521,6 +521,11 @@ function resetState() {
                     </div>
                 </div>
             </div>
+            <!-- Device Info Bar (type + manual link) - hidden by default -->
+            <div id="detectedDeviceInfo" class="detected-device-info hidden">
+                <span id="detectedDeviceType" class="device-type-badge"></span>
+                <a id="detectedManualLink" href="#" target="_blank" class="manual-link-badge hidden">📄 View Manual</a>
+            </div>
         `;
     }
     
@@ -641,7 +646,7 @@ function fullReset() {
 function setIdentificationMode(mode) {
     state.identificationMode = mode;
     
-    // Update toggle button states
+    // Update toggle button states (legacy)
     const photoBtn = elements.modePhotoBtn();
     const selectBtn = elements.modeSelectBtn();
     const photoSection = elements.photoModeSection();
@@ -650,14 +655,32 @@ function setIdentificationMode(mode) {
     const confirmBtn = document.getElementById('confirmBtn');
     const resetBtn = document.getElementById('resetBtn');
     
+    // Update new mode cards
+    const photoCard = document.getElementById('modeCardPhoto');
+    const selectCard = document.getElementById('modeCardSelect');
+    
     if (mode === "photo") {
+        // Legacy toggle states
         photoBtn?.classList.add("active");
         selectBtn?.classList.remove("active");
+        
+        // Card active states
+        photoCard?.classList.add("active");
+        selectCard?.classList.remove("active");
+        
+        // Show photo section, hide select section
         photoSection?.classList.remove("hidden");
         selectSection?.classList.add("hidden");
     } else {
+        // Legacy toggle states
         photoBtn?.classList.remove("active");
         selectBtn?.classList.add("active");
+        
+        // Card active states
+        photoCard?.classList.remove("active");
+        selectCard?.classList.add("active");
+        
+        // Show select section, hide photo section
         photoSection?.classList.add("hidden");
         selectSection?.classList.remove("hidden");
         
@@ -1060,6 +1083,72 @@ function showStreamlinedResults(data) {
         document.getElementById('editModeSection')?.classList.add('hidden');
         document.getElementById('deviceActionsSection')?.classList.add('hidden');
     }
+    
+    // Fetch and display device info (type + manual link) if available in database
+    if (mfrDetected && modelDetected) {
+        updateDetectedDeviceInfo(data.manufacturer, data.model_number);
+    } else {
+        // Hide device info bar if detection incomplete
+        hideDetectedDeviceInfo();
+    }
+}
+
+/**
+ * Fetches device info from the database and updates the detected device info bar.
+ * Shows device type and manual link if the device is found.
+ * 
+ * @param {string} manufacturer - The manufacturer name
+ * @param {string} model - The model name
+ */
+async function updateDetectedDeviceInfo(manufacturer, model) {
+    const infoBar = document.getElementById('detectedDeviceInfo');
+    const typeEl = document.getElementById('detectedDeviceType');
+    const linkEl = document.getElementById('detectedManualLink');
+    
+    if (!infoBar || !typeEl || !linkEl) return;
+    
+    try {
+        const response = await fetch(`/api/check-manual/${encodeURIComponent(manufacturer || "Unknown")}/${encodeURIComponent(model)}`);
+        const data = await response.json();
+        
+        // Check if we have device info to display
+        if (data.device_type || data.pdf_url) {
+            // Show device type if available
+            if (data.device_type) {
+                typeEl.textContent = `🏥 ${data.device_type}`;
+                typeEl.classList.remove('hidden');
+            } else {
+                typeEl.classList.add('hidden');
+            }
+            
+            // Show manual link if available
+            if (data.pdf_url && data.has_manual) {
+                linkEl.href = data.pdf_url;
+                linkEl.classList.remove('hidden');
+            } else {
+                linkEl.classList.add('hidden');
+            }
+            
+            // Show the info bar
+            infoBar.classList.remove('hidden');
+        } else {
+            // No device info - hide the bar
+            infoBar.classList.add('hidden');
+        }
+    } catch (error) {
+        console.error('Failed to fetch device info:', error);
+        infoBar.classList.add('hidden');
+    }
+}
+
+/**
+ * Hides the detected device info bar.
+ */
+function hideDetectedDeviceInfo() {
+    const infoBar = document.getElementById('detectedDeviceInfo');
+    if (infoBar) {
+        infoBar.classList.add('hidden');
+    }
 }
 
 /**
@@ -1183,6 +1272,7 @@ function showDeviceSuggestion(matchResult) {
     pendingSuggestion = {
         manufacturer: matchResult.manufacturer,
         model: matchResult.model,
+        device_type: matchResult.device_type,
         confidence: matchResult.confidence,
         reasoning: matchResult.reasoning
     };
@@ -1209,11 +1299,16 @@ function showDeviceSuggestion(matchResult) {
         `;
     }
     
-    // Populate the suggestion UI
+    // Populate the suggestion UI with device type
     const suggestedDeviceInfo = document.getElementById('suggestedDeviceInfo');
     if (suggestedDeviceInfo) {
+        let deviceTypeHtml = '';
+        if (matchResult.device_type) {
+            deviceTypeHtml = `<div class="suggested-device-type">🏥 ${escapeHtml(matchResult.device_type)}</div>`;
+        }
         suggestedDeviceInfo.innerHTML = `
-            <div class="suggested-device-name">${matchResult.manufacturer} ${matchResult.model}</div>
+            <div class="suggested-device-name">${escapeHtml(matchResult.manufacturer)} ${escapeHtml(matchResult.model)}</div>
+            ${deviceTypeHtml}
         `;
     }
     
@@ -1222,7 +1317,7 @@ function showDeviceSuggestion(matchResult) {
         const confidencePercent = Math.round(matchResult.confidence * 100);
         suggestionConfidence.innerHTML = `
             Match confidence: <strong>${confidencePercent}%</strong>
-            ${matchResult.reasoning ? `<br><em>${matchResult.reasoning}</em>` : ''}
+            ${matchResult.reasoning ? `<br><em>${escapeHtml(matchResult.reasoning)}</em>` : ''}
         `;
     }
     
@@ -1849,26 +1944,54 @@ async function checkAndShowManualStatus(manufacturer, model) {
         // Store the result for later use
         state.manualAvailable = data.has_manual;
         
-        // Update chat subtitle with device info
+        // Update chat subtitle with device info (include device type if available)
         const chatDeviceInfo = document.getElementById("chatDeviceInfo");
         if (chatDeviceInfo) {
-            chatDeviceInfo.innerHTML = `Current Device: <strong>${escapeHtml(data.device_name)}</strong>`;
+            let deviceInfoHtml = `Current Device: <strong>${escapeHtml(data.device_name)}</strong>`;
+            if (data.device_type) {
+                deviceInfoHtml += ` <span style="color: var(--text-muted); font-size: 12px;">(${escapeHtml(data.device_type)})</span>`;
+            }
+            chatDeviceInfo.innerHTML = deviceInfoHtml;
         }
         
         if (data.has_manual) {
-            // Manual found - show compact success notification
+            // Manual found - show success notification with PDF link
             notification.className = "manual-notification has-manual";
-            notification.innerHTML = `
+            
+            // Build the notification content with device type and PDF link
+            let notificationContent = `
                 <span class="notification-icon">📚</span>
-                <span>Official manual available — Halo will search the documentation for answers.</span>
-            `;
+                <div class="notification-content">
+                    <span class="notification-main">Official manual available — Halo will search the documentation for answers.</span>`;
+            
+            // Add device type if available
+            if (data.device_type) {
+                notificationContent += `<span class="notification-type">Device Type: <strong>${escapeHtml(data.device_type)}</strong></span>`;
+            }
+            
+            // Add PDF link if available
+            if (data.pdf_url) {
+                notificationContent += `<a href="${escapeHtml(data.pdf_url)}" target="_blank" class="notification-pdf-link">📄 View User Manual (PDF)</a>`;
+            }
+            
+            notificationContent += `</div>`;
+            notification.innerHTML = notificationContent;
         } else {
             // No manual - show compact warning notification
             notification.className = "manual-notification no-manual";
-            notification.innerHTML = `
+            
+            let notificationContent = `
                 <span class="notification-icon">🌐</span>
-                <span>No manual found — Halo will search the internet. Please verify critical info.</span>
-            `;
+                <div class="notification-content">
+                    <span class="notification-main">No manual found — Halo will search the internet. Please verify critical info.</span>`;
+            
+            // Still show device type if available
+            if (data.device_type) {
+                notificationContent += `<span class="notification-type">Device Type: <strong>${escapeHtml(data.device_type)}</strong></span>`;
+            }
+            
+            notificationContent += `</div>`;
+            notification.innerHTML = notificationContent;
         }
         
         notification.classList.remove("hidden");
